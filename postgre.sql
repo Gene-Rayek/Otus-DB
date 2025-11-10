@@ -1,4 +1,3 @@
-```sql
 CREATE TABLE product_categories (
     id           BIGSERIAL PRIMARY KEY,
     name         VARCHAR(100) NOT NULL,
@@ -174,4 +173,4 @@ CREATE TABLE datamatrix_batches (
     CHECK (range_end >= range_start)
 );
 
-```
+
