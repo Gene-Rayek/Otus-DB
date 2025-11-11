@@ -43,12 +43,44 @@
 -	Для каждого производственного заказа формируются одна или несколько партий DataMatrix-кодов (datamatrix_batches), каждая — диапазон кодов, который можно однозначно сопоставить конкретному клиенту, заказу и продукту.
 -	Цены (prices) привязаны к продукту, опционально — к конкретному клиенту, и имеют период действия.
 
-4. ER-диаграмма <img width="2967" height="1346" alt="diagram" src="https://github.com/user-attachments/assets/33b596d7-9f48-4446-ae2b-c28b813a1c88" />
+4. ER-диаграмма <img width="1313" height="1614" alt="update diagram" src="https://github.com/user-attachments/assets/f58e098d-e503-44a0-9f91-0a9ceca973b3" />
+
 
 
 Описание таблиц и полей
 
 ```sql
+CREATE TABLE entities (
+    id           BIGSERIAL PRIMARY KEY,
+    entity_type  VARCHAR(30) NOT NULL
+                 CHECK (entity_type IN ('customer', 'supplier', 'manufacturer')),
+    ref_id       BIGINT NOT NULL,
+    name         VARCHAR(150) NOT NULL,
+    inn          VARCHAR(20),
+    is_active    BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE contacts (
+    id           BIGSERIAL PRIMARY KEY,
+    entity_id    BIGINT NOT NULL REFERENCES entities(id)
+                 ON UPDATE CASCADE ON DELETE CASCADE,
+    full_name    VARCHAR(100) NOT NULL,
+    position     VARCHAR(100),
+    comment      TEXT,
+    is_primary   BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE contact_channels (
+    id           BIGSERIAL PRIMARY KEY,
+    contact_id   BIGINT NOT NULL REFERENCES contacts(id)
+                 ON UPDATE CASCADE ON DELETE CASCADE,
+    channel_type VARCHAR(30) NOT NULL
+                 CHECK (channel_type IN ('phone', 'email', 'address', 'telegram', 'website')),
+    label        VARCHAR(50),
+    value        TEXT NOT NULL,
+    is_primary   BOOLEAN DEFAULT FALSE
+);
+
 CREATE TABLE product_categories (
     id           BIGSERIAL PRIMARY KEY,
     name         VARCHAR(100) NOT NULL,
@@ -82,7 +114,7 @@ CREATE TABLE manufacturers (
 CREATE TABLE customers (
     id           BIGSERIAL PRIMARY KEY,
     name         VARCHAR(150) NOT NULL,
-    type         VARCHAR(20) DEFAULT 'b2b',     -- b2b / b2c / distributor
+    type         VARCHAR(20) DEFAULT 'b2b',   -- b2b / b2c / distributor
     inn          VARCHAR(20),
     contact_name VARCHAR(100),
     phone        VARCHAR(30),
@@ -123,19 +155,18 @@ CREATE TABLE products (
     updated_at           TIMESTAMP DEFAULT NOW()
 );
 
-  CREATE TABLE prices (
+CREATE TABLE prices (
     id          BIGSERIAL PRIMARY KEY,
     product_id  BIGINT NOT NULL REFERENCES products(id)
                 ON UPDATE CASCADE ON DELETE CASCADE,
     customer_id BIGINT REFERENCES customers(id)
                 ON UPDATE CASCADE ON DELETE CASCADE,
     price_type  VARCHAR(20) DEFAULT 'retail',   -- retail / wholesale / contract
-    currency    VARCHAR(3)  DEFAULT 'RUB',
-    value       NUMERIC(12,2) NOT NULL,
+    currency    VARCHAR(3) DEFAULT 'RUB',
+    value       NUMERIC(12,2) NOT NULL CHECK (value >= 0),
     min_qty     INT DEFAULT 1,
     valid_from  DATE NOT NULL,
-    valid_to    DATE,
-    CHECK (value >= 0)
+    valid_to    DATE
 );
 
 CREATE TABLE orders (
@@ -143,7 +174,7 @@ CREATE TABLE orders (
     customer_id    BIGINT NOT NULL REFERENCES customers(id)
                    ON UPDATE CASCADE ON DELETE RESTRICT,
     order_date     DATE DEFAULT CURRENT_DATE,
-    status         VARCHAR(20) DEFAULT 'new',   -- new/in_production/ready/shipped/cancelled
+    status         VARCHAR(20) DEFAULT 'new',  -- new/in_production/ready/shipped/cancelled
     total_amount   NUMERIC(14,2) DEFAULT 0,
     currency       VARCHAR(3) DEFAULT 'RUB',
     payment_status VARCHAR(20) DEFAULT 'unpaid', -- unpaid/partial/paid
@@ -159,15 +190,13 @@ CREATE TABLE order_items (
                      ON UPDATE CASCADE ON DELETE CASCADE,
     product_id       BIGINT NOT NULL REFERENCES products(id)
                      ON UPDATE CASCADE ON DELETE RESTRICT,
-    quantity         INT NOT NULL,
+    quantity         INT NOT NULL CHECK (quantity > 0),
     unit_price       NUMERIC(12,2) NOT NULL,
-    discount_percent NUMERIC(5,2) DEFAULT 0,
+    discount_percent NUMERIC(5,2) DEFAULT 0 CHECK (discount_percent BETWEEN 0 AND 100),
     line_total       NUMERIC(14,2),
     dm_required      BOOLEAN DEFAULT TRUE,
     dm_standard      VARCHAR(50),
-    comment          TEXT,
-    CHECK (quantity > 0),
-    CHECK (discount_percent >= 0 AND discount_percent <= 100)
+    comment          TEXT
 );
 
 CREATE TABLE purchase_orders (
@@ -187,13 +216,10 @@ CREATE TABLE purchase_order_items (
                       ON UPDATE CASCADE ON DELETE CASCADE,
     material_id       BIGINT NOT NULL REFERENCES materials(id)
                       ON UPDATE CASCADE ON DELETE RESTRICT,
-    quantity          NUMERIC(12,3) NOT NULL,
-    unit_price        NUMERIC(12,2) NOT NULL,
-    line_total        NUMERIC(14,2),
-    CHECK (quantity > 0),
-    CHECK (unit_price >= 0)
+    quantity          NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+    unit_price        NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+    line_total        NUMERIC(14,2)
 );
-
 
 CREATE TABLE production_orders (
     id                  BIGSERIAL PRIMARY KEY,
@@ -201,15 +227,14 @@ CREATE TABLE production_orders (
                         ON UPDATE CASCADE ON DELETE RESTRICT,
     manufacturer_id     BIGINT NOT NULL REFERENCES manufacturers(id)
                         ON UPDATE CASCADE ON DELETE RESTRICT,
-    planned_qty         INT NOT NULL,
+    planned_qty         INT NOT NULL CHECK (planned_qty > 0),
     produced_qty        INT,
     scrap_qty           INT,
     status              VARCHAR(20) DEFAULT 'planned', -- planned/in_progress/done/cancelled
     planned_start_date  DATE,
     planned_end_date    DATE,
     actual_start_date   DATE,
-    actual_end_date     DATE,
-    CHECK (planned_qty > 0)
+    actual_end_date     DATE
 );
 
 CREATE TABLE datamatrix_batches (
@@ -410,7 +435,48 @@ ORDER BY custom_orders_count DESC;
 
 Описание всех таблиц и полей
 
-1. Таблица product_categories — категории продуктов
+1. entities — универсальные сущности (для контактов)
+
+Объединяет всех контрагентов (клиентов, поставщиков, производителей)
+для централизованного хранения контактных данных.
+
+| Поле          | Тип            | Описание                                     |
+| ------------- | -------------- | -------------------------------------------- |
+| `id`          | BIGSERIAL (PK) | Уникальный ID сущности.                      |
+| `entity_type` | VARCHAR(30)    | Тип: `customer`, `supplier`, `manufacturer`. |
+| `ref_id`      | BIGINT         | ID записи из соответствующей таблицы.        |
+| `name`        | VARCHAR(150)   | Название организации.                        |
+| `inn`         | VARCHAR(20)    | ИНН.                                         |
+| `is_active`   | BOOLEAN        | Активна ли запись.                           |
+
+2. contacts — контактные лица
+
+Контактные лица, относящиеся к организациям (entities).
+
+| Поле         | Тип                       | Описание                                    |
+| ------------ | ------------------------- | ------------------------------------------- |
+| `id`         | BIGSERIAL (PK)            | Идентификатор контакта.                     |
+| `entity_id`  | BIGINT FK → `entities.id` | К какой организации относится.              |
+| `full_name`  | VARCHAR(100)              | ФИО.                                        |
+| `position`   | VARCHAR(100)              | Должность (например, менеджер по закупкам). |
+| `comment`    | TEXT                      | Примечание.                                 |
+| `is_primary` | BOOLEAN                   | Основной контакт.                           |
+
+3. contact_channels — каналы связи
+
+Способы связи (телефоны, e-mail, адреса, мессенджеры).
+
+| Поле           | Тип                       | Описание                                                  |
+| -------------- | ------------------------- | --------------------------------------------------------- |
+| `id`           | BIGSERIAL (PK)            | ID канала связи.                                          |
+| `contact_id`   | BIGINT FK → `contacts.id` | Контактное лицо.                                          |
+| `channel_type` | VARCHAR(30)               | Тип (`phone`, `email`, `address`, `telegram`, `website`). |
+| `label`        | VARCHAR(50)               | Метка (например, «офис», «склад»).                        |
+| `value`        | TEXT                      | Значение (телефон, адрес, e-mail).                        |
+| `is_primary`   | BOOLEAN                   | Основной канал данного типа.                              |
+
+
+4. Таблица product_categories — категории продуктов
 
 Категории этикеток/бирок (например, «Термоэтикетки», «Бирки с петлёй»).
 
@@ -421,7 +487,7 @@ ORDER BY custom_orders_count DESC;
 | `parent_id`   | BIGINT, FK → `product_categories.id` (NULL) | Родительская категория (для иерархии).          |
 | `description` | TEXT                                        | Описание категории, комментарии.                |
 
-2. Таблица suppliers — поставщики
+5. Таблица suppliers — поставщики
 
 Организации, поставляющие материалы, сырьё и т.п.
 
@@ -436,7 +502,7 @@ ORDER BY custom_orders_count DESC;
 | `address`      | VARCHAR(255)  | Адрес (юр./факс/физический).                     |
 | `is_active`    | BOOLEAN       | Признак, работаете ли сейчас с этим поставщиком. |
 
-3. Таблица manufacturers — производители / цеха
+6. Таблица manufacturers — производители / цеха
 
 Внутренние цеха или внешние подрядчики, где печатаются этикетки.
 
@@ -451,7 +517,7 @@ ORDER BY custom_orders_count DESC;
 | `email`        | VARCHAR(100)  | Email.                                            |
 | `is_internal`  | BOOLEAN       | TRUE — внутренний цех, FALSE — внешний подрядчик. |
 
-4. Таблица customers — покупатели
+7. Таблица customers — покупатели
 
 Клиенты, которые заказывают этикетки/бирки.
 
@@ -468,7 +534,8 @@ ORDER BY custom_orders_count DESC;
 | `is_active`    | BOOLEAN       | Активный клиент или нет.                   |
 | `created_at`   | TIMESTAMP     | Дата создания записи о клиенте.            |
 
-5. Таблица materials — материалы
+
+8. Таблица materials — материалы
 
 Материалы, на которых печатаются этикетки/бирки.
 
@@ -483,7 +550,7 @@ ORDER BY custom_orders_count DESC;
 | `sku`               | VARCHAR(50)                 | Внутренний код/артикул материала.            |
 | `is_active`         | BOOLEAN                     | Признак использования материала сейчас.      |
 
-6. Таблица products — продукты (этикетки/бирки)
+9. Таблица products — продукты (этикетки/бирки)
 
 Конкретные типы этикеток и бирок.
 
@@ -504,7 +571,7 @@ ORDER BY custom_orders_count DESC;
 | `created_at`           | TIMESTAMP                            | Дата создания продукта.                            |
 | `updated_at`           | TIMESTAMP                            | Дата последнего изменения.                         |
 
-7. Таблица prices — цены
+10. Таблица prices — цены
 
 История цен и спец-цены для клиентов.
 
@@ -520,7 +587,7 @@ ORDER BY custom_orders_count DESC;
 | `valid_from`  | DATE                               | Дата начала действия цены.                                    |
 | `valid_to`    | DATE (NULL)                        | Дата окончания (NULL — до отмены/изменения).                  |
 
-8. Таблица orders — заказы (покупки клиентов)
+11. Таблица orders — заказы (покупки клиентов)
 
 Шапка заказа клиента.
 
@@ -538,7 +605,7 @@ ORDER BY custom_orders_count DESC;
 | `created_at`     | TIMESTAMP                   | Дата создания записи.                                             |
 | `updated_at`     | TIMESTAMP                   | Дата последнего изменения.                                        |
 
-9. Таблица order_items — позиции заказов
+12. Таблица order_items — позиции заказов
 
 Строки в заказе: какие продукты и в каком количестве.
 
@@ -555,7 +622,7 @@ ORDER BY custom_orders_count DESC;
 | `dm_standard`      | VARCHAR(50)                | Стандарт кодирования для этой партии (может отличаться от стандартного для продукта). |
 | `comment`          | TEXT                       | Особые требования по дизайну/данным.                                                  |
 
-10. Таблица purchase_orders — заказы поставщикам
+13. Таблица purchase_orders — заказы поставщикам
 
 Закупка материалов.
 
@@ -569,7 +636,7 @@ ORDER BY custom_orders_count DESC;
 | `currency`     | VARCHAR(3)                  | Валюта.                                                |
 | `created_at`   | TIMESTAMP                   | Дата создания записи.                                  |
 
-11. Таблица purchase_order_items — позиции закупок
+14. Таблица purchase_order_items — позиции закупок
 
 Строки в заказе поставщику.
 
@@ -582,7 +649,7 @@ ORDER BY custom_orders_count DESC;
 | `unit_price`        | NUMERIC(12,2)                     | Цена за единицу.                          |
 | `line_total`        | NUMERIC(14,2)                     | Сумма по позиции (quantity × unit_price). |
 
-12. Таблица production_orders — производственные заказы
+15. Таблица production_orders — производственные заказы
 
 Производство тиража по конкретной позиции клиентского заказа.
 
@@ -600,7 +667,7 @@ ORDER BY custom_orders_count DESC;
 | `actual_start_date`  | DATE (NULL)                     | Фактическое начало.                                     |
 | `actual_end_date`    | DATE (NULL)                     | Фактическое завершение.                                 |
 
-13. Таблица datamatrix_batches — партии DataMatrix-кодов
+16. Таблица datamatrix_batches — партии DataMatrix-кодов
 
 Диапазоны DataMatrix-кодов, привязанные к производственным заказам.
 
